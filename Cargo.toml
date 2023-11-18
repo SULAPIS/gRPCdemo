@@ -1,0 +1,4 @@
+
+[workspace]
+members = [ "abi", "document_collection","service", "user"]
+resolver = "2"
