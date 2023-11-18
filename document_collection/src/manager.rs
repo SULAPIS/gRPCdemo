@@ -1,14 +1,14 @@
 use std::time::SystemTime;
 
-use abi::DbConfig;
+use abi::{DbConfig, DocumentQuery};
 use async_trait::async_trait;
-use chrono::{DateTime, Days, Utc};
+use chrono::{Date, DateTime, Days, NaiveDate, Utc};
 use futures::StreamExt;
-use prost_wkt_types::Struct;
+use prost_wkt_types::{Struct, Timestamp};
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, types::Uuid, Either, PgPool};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{Dc, DcManager};
 
@@ -67,16 +67,48 @@ impl Dc for DcManager {
         query: abi::DocumentQuery,
     ) -> mpsc::Receiver<Result<abi::Document, abi::Error>> {
         let pool = self.pool.clone();
+        let DocumentQuery {
+            user_id,
+            start,
+            end,
+        } = query;
+        let user_id = Uuid::parse_str(&user_id).unwrap();
+        let start = start
+            .map(|t| {
+                DateTime::<Utc>::from(t)
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+            })
+            .unwrap_or_default();
+        let end = end
+            .map(|t| {
+                DateTime::<Utc>::from(t)
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    + Days::new(1)
+            })
+            .unwrap_or(
+                DateTime::<Utc>::from(SystemTime::now())
+                    .date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    + Days::new(1),
+            );
+        debug!("Querying documents: {:?} {:?} {:?}", user_id, start, end);
         let (tx, rx) = mpsc::channel(128);
 
         tokio::spawn(async move {
             let sql = "SELECT * FROM dc.documents WHERE user_id = $1 AND created_at >= $2 AND created_at < $3";
-            let mut docs = sqlx::query_as(&sql).fetch_many(&pool);
+            let mut docs = sqlx::query_as(&sql)
+                .bind(user_id)
+                .bind(start)
+                .bind(end)
+                .fetch_many(&pool);
             while let Some(ret) = docs.next().await {
                 match ret {
-                    Ok(Either::Left(r)) => {
-                        info!("Query result: {:?}", r);
-                    }
+                    Ok(Either::Left(r)) => {}
                     Ok(Either::Right(r)) => {
                         if tx.send(Ok(r)).await.is_err() {
                             // rx is dropped, so client disconnected
